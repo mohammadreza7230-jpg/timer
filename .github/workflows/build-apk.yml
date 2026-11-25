@@ -10,129 +10,195 @@ permissions:
   contents: write
 
 jobs:
-  build-android-apk:
+  build-apk:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify package.json and build script
-        run: |
-          if [ ! -f package.json ]; then
-            echo "Error: package.json not found in repository root."
-            exit 1
-          fi
-          node -e '
-            const pkg = JSON.parse(require("fs").readFileSync("package.json", "utf8"));
-            if (!pkg.scripts || !pkg.scripts.build) {
-              console.error("Error: package.json does not contain a build script.");
-              process.exit(1);
-            }
-          '
-
-      - name: Set up Node.js
+      - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
-      - name: Set up Java 21
-        uses: actions/setup-java@v4
+      - name: Set up Temurin Java 21
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install dependencies
+      - name: Verify build environment
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
+          node -v
+          npm -v
+          java -version
+          echo "JAVA_HOME=${JAVA_HOME:-<unset>}"
 
-      - name: Build web app
-        run: npm run build
-
-      - name: Detect web build output directory
-        id: webdir
-        run: |
-          if [ -d "dist" ] && [ -n "$(ls -A dist)" ]; then
-            echo "dir=dist" >> "$GITHUB_OUTPUT"
-          elif [ -d "build" ] && [ -n "$(ls -A build)" ]; then
-            echo "dir=build" >> "$GITHUB_OUTPUT"
-          elif [ -d "out" ] && [ -n "$(ls -A out)" ]; then
-            echo "dir=out" >> "$GITHUB_OUTPUT"
-          else
-            echo "Error: Could not find a non-empty build output directory (dist, build, or out)."
+          JAVA_VERSION_OUTPUT="$(java -version 2>&1)"
+          RAW_VERSION="$(echo "$JAVA_VERSION_OUTPUT" | awk -F '"' '/version/ {print $2; exit}')"
+          if [ -z "$RAW_VERSION" ]; then
+            echo "Error: Unable to detect active Java version."
             exit 1
           fi
 
-      - name: Initialize temporary Capacitor Android project
-        run: |
-          REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          SANITIZED_SLUG="$(echo "$REPO_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')"
-          if [ -z "$SANITIZED_SLUG" ] || echo "$SANITIZED_SLUG" | grep -qE '^[0-9]'; then
-            SANITIZED_SLUG="app${SANITIZED_SLUG}"
+          JAVA_MAJOR="$(echo "$RAW_VERSION" | awk -F '.' '{if ($1 == "1") print $2; else print $1}' | sed 's/[^0-9].*//')"
+          if [ -z "$JAVA_MAJOR" ] || ! [ "$JAVA_MAJOR" -eq "$JAVA_MAJOR" ] 2>/dev/null; then
+            echo "Error: Unable to parse Java major version from '$RAW_VERSION'."
+            exit 1
           fi
-          APP_ID="com.aistudio.${SANITIZED_SLUG}"
-          APP_NAME="$(FALLBACK_NAME="$REPO_NAME" node -e '
-            const fs = require("fs");
-            let name = "";
-            if (fs.existsSync("metadata.json")) {
-              try { name = (JSON.parse(fs.readFileSync("metadata.json", "utf8")).name || "").trim(); } catch {}
-            }
-            console.log(name || process.env.FALLBACK_NAME);
-          ')"
 
-          echo "APP_NAME=$APP_NAME" >> "$GITHUB_ENV"
-          echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
-          echo "APK_FILENAME=${SANITIZED_SLUG}-debug.apk" >> "$GITHUB_ENV"
+          echo "Detected Java major version: $JAVA_MAJOR"
+          if [ "$JAVA_MAJOR" -lt 17 ]; then
+            echo "Error: Java 17 or newer is required, but detected Java $JAVA_MAJOR."
+            exit 1
+          fi
 
-          npm install --no-save @capacitor/core@7 @capacitor/cli@7 @capacitor/android@7
+      - name: Build web application
+        id: build_web
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --legacy-peer-deps
+          else
+            npm install --legacy-peer-deps
+          fi
 
-          if [ ! -f capacitor.config.ts ] && [ ! -f capacitor.config.json ] && [ ! -f capacitor.config.js ]; then
-            npx cap init "$APP_NAME" "$APP_ID" --web-dir "${{ steps.webdir.outputs.dir }}"
+          npm run build
+
+          DETECTED_DIR=""
+          for candidate in dist build out; do
+            if [ -d "$candidate" ] && [ -n "$(ls -A "$candidate")" ]; then
+              DETECTED_DIR="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$DETECTED_DIR" ]; then
+            echo "Error: No non-empty web build output directory found (checked: dist, build, out)."
+            exit 1
+          fi
+
+          echo "Detected web output directory: $DETECTED_DIR"
+          echo "web_dir=$DETECTED_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Capacitor Android project
+        env:
+          WEB_DIR: ${{ steps.build_web.outputs.web_dir }}
+        run: |
+          npm install --legacy-peer-deps --no-save @capacitor/core @capacitor/cli @capacitor/android
+
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          SANITIZED_REPO="$(echo "$REPO_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')"
+          if [ -z "$SANITIZED_REPO" ] || echo "$SANITIZED_REPO" | grep -qE '^[0-9]'; then
+            SANITIZED_REPO="app${SANITIZED_REPO}"
+          fi
+
+          APP_ID="com.github.${SANITIZED_REPO}"
+          APP_NAME="$(echo "$REPO_NAME" | sed 's/[^a-zA-Z0-9 _-]//g' | tr '_-' '  ' | xargs)"
+          if [ -z "$APP_NAME" ]; then
+            APP_NAME="App"
+          fi
+
+          echo "Derived appId: $APP_ID"
+          echo "Derived appName: $APP_NAME"
+          echo "Using webDir: $WEB_DIR"
+
+          if [ ! -f capacitor.config.json ] && [ ! -f capacitor.config.ts ]; then
+            APP_ID="$APP_ID" APP_NAME="$APP_NAME" WEB_DIR="$WEB_DIR" node -e '
+              const fs = require("fs");
+              const config = {
+                appId: process.env.APP_ID,
+                appName: process.env.APP_NAME,
+                webDir: process.env.WEB_DIR,
+              };
+              fs.writeFileSync("capacitor.config.json", JSON.stringify(config, null, 2) + "\n");
+            '
           fi
 
           npx cap add android
           npx cap sync android
 
-      - name: Build Android debug APK
-        run: |
-          cd android
-          chmod +x gradlew
-          ./gradlew assembleDebug
-          cd ..
-
-          APK_PATH="android/app/build/outputs/apk/debug/app-debug.apk"
-          if [ ! -f "$APK_PATH" ]; then
-            echo "Error: Debug APK was not generated at $APK_PATH"
+          if [ ! -d android ] || [ ! -f android/gradlew ]; then
+            echo "Error: Failed to generate Capacitor Android project or android/gradlew is missing."
             exit 1
           fi
 
-          mkdir -p release-apk
-          cp "$APK_PATH" "release-apk/${APK_FILENAME}"
+          chmod +x android/gradlew
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: Verify debug APK
+        run: |
+          APK_PATH="android/app/build/outputs/apk/debug/app-debug.apk"
+          if [ -f "$APK_PATH" ] && [ -s "$APK_PATH" ] && [[ "$APK_PATH" == *.apk ]]; then
+            echo "Verified debug APK: $APK_PATH"
+            ls -lh "$APK_PATH"
+          else
+            echo "Error: Expected non-empty debug APK at $APK_PATH was not found."
+            if [ -d "android/app/build/outputs/apk" ]; then
+              echo "Discovered APK files inside android/app/build/outputs/apk:"
+              find android/app/build/outputs/apk -type f -name "*.apk" || true
+            else
+              echo "Directory android/app/build/outputs/apk does not exist."
+            fi
+            exit 1
+          fi
 
       - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: android-debug-apk
-          path: release-apk/${{ env.APK_FILENAME }}
+          name: app-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
-      - name: Publish debug APK to GitHub Releases
+      - name: Prepare APK release asset
+        id: prepare_release_asset
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          SAFE_REPO="$(echo "$REPO_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g; s/-\+/-/g; s/^[.-]*//; s/[.-]*$//')"
+          if [ -z "$SAFE_REPO" ]; then
+            SAFE_REPO="app"
+          fi
+
+          RELEASE_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/apk-release-XXXXXX")"
+          ASSET_FILENAME="${SAFE_REPO}-debug-build-${GITHUB_RUN_NUMBER}.apk"
+          ASSET_PATH="${RELEASE_DIR}/${ASSET_FILENAME}"
+
+          cp "android/app/build/outputs/apk/debug/app-debug.apk" "$ASSET_PATH"
+
+          if [ ! -f "$ASSET_PATH" ] || [ ! -s "$ASSET_PATH" ]; then
+            echo "Error: Failed to prepare release APK asset at $ASSET_PATH"
+            exit 1
+          fi
+
+          echo "Prepared release asset: $ASSET_PATH"
+          echo "asset_path=$ASSET_PATH" >> "$GITHUB_OUTPUT"
+          echo "asset_filename=$ASSET_FILENAME" >> "$GITHUB_OUTPUT"
+
+      - name: Publish APK to GitHub Releases
+        id: publish_release
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
-          TAG="apk-b${GITHUB_RUN_NUMBER}-${SHORT_SHA}"
-          TITLE="Android Debug APK — Build #${GITHUB_RUN_NUMBER} (${SHORT_SHA})"
-          NOTES=$(printf 'Automatic Capacitor Android debug APK build from commit `%s` on branch `%s`.\n\nDownload `%s` below to install on an Android device.' "$SHORT_SHA" "$GITHUB_REF_NAME" "$APK_FILENAME")
+          TAG="debug-build-${GITHUB_RUN_NUMBER}-${SHORT_SHA}"
+          TITLE="Android Debug APK (Build #${GITHUB_RUN_NUMBER})"
+          NOTES=$(printf 'Automated Capacitor Android debug APK build.\n\n- Branch: `%s`\n- Commit: `%s`\n- Asset: `%s`\n\nDownload the `.apk` file below to install on an Android device.' "$GITHUB_REF_NAME" "$SHORT_SHA" "${{ steps.prepare_release_asset.outputs.asset_filename }}")
 
-          gh release create "$TAG" "release-apk/${APK_FILENAME}" \
+          gh release create "$TAG" "${{ steps.prepare_release_asset.outputs.asset_path }}" \
+            --target "${{ github.sha }}" \
             --title "$TITLE" \
             --notes "$NOTES" \
             --latest
+
+      - name: Report release status
+        if: always() && (steps.publish_release.outcome == 'success' || steps.publish_release.outcome == 'failure')
+        run: |
+          if [ "${{ steps.publish_release.outcome }}" = "success" ]; then
+            echo "GitHub Release published successfully with asset ${{ steps.prepare_release_asset.outputs.asset_filename }}."
+          else
+            echo "Warning: Publishing to GitHub Releases failed (outcome: ${{ steps.publish_release.outcome }}). The workflow artifact 'app-debug-apk' remains uploaded and available for download."
+          fi
