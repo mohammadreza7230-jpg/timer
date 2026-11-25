@@ -1,0 +1,6 @@
+{
+  "name": "تایمر زنگ چرخه‌ای",
+  "description": "تایمر بازه‌ای ساده و آفلاین موبایل با زنگ ممتد، دکمه‌های آماده پاستلی و شروع خودکار دور بعدی.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

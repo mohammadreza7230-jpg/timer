@@ -1,0 +1,138 @@
+name: Build and Release Android Debug APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-android-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify package.json and build script
+        run: |
+          if [ ! -f package.json ]; then
+            echo "Error: package.json not found in repository root."
+            exit 1
+          fi
+          node -e '
+            const pkg = JSON.parse(require("fs").readFileSync("package.json", "utf8"));
+            if (!pkg.scripts || !pkg.scripts.build) {
+              console.error("Error: package.json does not contain a build script.");
+              process.exit(1);
+            }
+          '
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Build web app
+        run: npm run build
+
+      - name: Detect web build output directory
+        id: webdir
+        run: |
+          if [ -d "dist" ] && [ -n "$(ls -A dist)" ]; then
+            echo "dir=dist" >> "$GITHUB_OUTPUT"
+          elif [ -d "build" ] && [ -n "$(ls -A build)" ]; then
+            echo "dir=build" >> "$GITHUB_OUTPUT"
+          elif [ -d "out" ] && [ -n "$(ls -A out)" ]; then
+            echo "dir=out" >> "$GITHUB_OUTPUT"
+          else
+            echo "Error: Could not find a non-empty build output directory (dist, build, or out)."
+            exit 1
+          fi
+
+      - name: Initialize temporary Capacitor Android project
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          SANITIZED_SLUG="$(echo "$REPO_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')"
+          if [ -z "$SANITIZED_SLUG" ] || echo "$SANITIZED_SLUG" | grep -qE '^[0-9]'; then
+            SANITIZED_SLUG="app${SANITIZED_SLUG}"
+          fi
+          APP_ID="com.aistudio.${SANITIZED_SLUG}"
+          APP_NAME="$(FALLBACK_NAME="$REPO_NAME" node -e '
+            const fs = require("fs");
+            let name = "";
+            if (fs.existsSync("metadata.json")) {
+              try { name = (JSON.parse(fs.readFileSync("metadata.json", "utf8")).name || "").trim(); } catch {}
+            }
+            console.log(name || process.env.FALLBACK_NAME);
+          ')"
+
+          echo "APP_NAME=$APP_NAME" >> "$GITHUB_ENV"
+          echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
+          echo "APK_FILENAME=${SANITIZED_SLUG}-debug.apk" >> "$GITHUB_ENV"
+
+          npm install --no-save @capacitor/core@7 @capacitor/cli@7 @capacitor/android@7
+
+          if [ ! -f capacitor.config.ts ] && [ ! -f capacitor.config.json ] && [ ! -f capacitor.config.js ]; then
+            npx cap init "$APP_NAME" "$APP_ID" --web-dir "${{ steps.webdir.outputs.dir }}"
+          fi
+
+          npx cap add android
+          npx cap sync android
+
+      - name: Build Android debug APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+          cd ..
+
+          APK_PATH="android/app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -f "$APK_PATH" ]; then
+            echo "Error: Debug APK was not generated at $APK_PATH"
+            exit 1
+          fi
+
+          mkdir -p release-apk
+          cp "$APK_PATH" "release-apk/${APK_FILENAME}"
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-apk
+          path: release-apk/${{ env.APK_FILENAME }}
+          if-no-files-found: error
+
+      - name: Publish debug APK to GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          TAG="apk-b${GITHUB_RUN_NUMBER}-${SHORT_SHA}"
+          TITLE="Android Debug APK — Build #${GITHUB_RUN_NUMBER} (${SHORT_SHA})"
+          NOTES=$(printf 'Automatic Capacitor Android debug APK build from commit `%s` on branch `%s`.\n\nDownload `%s` below to install on an Android device.' "$SHORT_SHA" "$GITHUB_REF_NAME" "$APK_FILENAME")
+
+          gh release create "$TAG" "release-apk/${APK_FILENAME}" \
+            --title "$TITLE" \
+            --notes "$NOTES" \
+            --latest

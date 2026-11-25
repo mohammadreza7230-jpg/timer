@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'Vazirmatn', 'Outfit', system-ui, -apple-system, sans-serif;
+    --font-num: 'Outfit', 'Vazirmatn', system-ui, sans-serif;
+  }
+
+  html,
+  body {
+    font-family: var(--font-sans);
+    background-color: #FFFDF9;
+    color: #2D2A26;
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+}
+
+.tabular-digits {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* Soft calm alarm pulse animations using compositor-only transform & opacity */
+@keyframes alarm-ripple {
+  0% {
+    transform: scale(0.95);
+    opacity: 0.55;
+  }
+  70% {
+    transform: scale(1.28);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.28);
+    opacity: 0;
+  }
+}
+
+@keyframes alarm-breathe {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.03);
+  }
+}
+
+.animate-alarm-ripple-1 {
+  animation: alarm-ripple 2.2s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.animate-alarm-ripple-2 {
+  animation: alarm-ripple 2.2s cubic-bezier(0.16, 1, 0.3, 1) 0.75s infinite;
+}
+
+.animate-alarm-breathe {
+  animation: alarm-breathe 2.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-alarm-ripple-1,
+  .animate-alarm-ripple-2,
+  .animate-alarm-breathe {
+    animation: none;
+  }
+}
+
+/* Hide scrollbars cleanly for horizontal preset strip & picker */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.pb-safe {
+  padding-bottom: max(1.25rem, env(safe-area-inset-bottom));
+}
+
+.pt-safe {
+  padding-top: max(0.75rem, env(safe-area-inset-top));
+}
